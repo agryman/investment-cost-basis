@@ -1,0 +1,395 @@
+---
+title: "Summary of Assante Open Account"
+author: "Arthur Ryman"
+date: '2017-04-18'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+```{r date.of.death}
+date.of.death <- as.Date("2016-07-25")
+```
+
+This document summarizes the transactions in Bella Ryman's Assante Open account `101947455NO`
+for use in filing her 2016 personal income tax return.
+Bella died on ``r date.of.death``.
+I need to compute the unrealized capital gain (or loss) on the investments in this account because that amount is taxable.
+I also need to compute the realized capital gain on all redemptions, the amount of dividends received, and the amount paid in management fees
+as of the date of death.
+
+## Data Preparation
+
+```{r file.names}
+txn.export.filename <- "2017-04-18-assante-transactions-export-bella-open.csv"
+txn.table.file <- "2017-04-18-assante-transactions-table-bella-open"
+txn.table.filename <- paste0(txn.table.file,".csv")
+```
+To prepare the data for this analysis, I did the following:
+
+1. in Quicken
+    1. enter transaction data from Bella's Assante statements
+    2. view the transactions sorted by date
+    3. export the transactions as CSV to ``r txn.export.filename``
+2. in Excel
+    1. edit the exported CSV file in Excel to turn it into a flat data table
+    2. save the result as CSV to ``r txn.table.filename``
+
+The following table lists the first few rows of the raw transaction data:
+```{r read.csv}
+txn <- read.csv(txn.table.filename, colClasses = "character")
+knitr::kable(txn[1:6,], caption = "Sample of raw transaction data")
+```
+
+I read the CSV file as character data to avoid any automatic data conversions.
+I explicitly convert the character data to its proper type in the following steps.
+
+### Date
+
+The `Date` column contains the transaction date in `YYYY-MM-DD` format.
+It is convenient for income tax purposes to extract the year of the transaction
+and to indicate if the transaction applies to the estate.
+```{r date}
+txn$Date <- as.Date(txn$Date)
+txn$Year <- format(txn$Date, "%Y")
+txn$Estate <- txn$Date > date.of.death
+```
+
+### Type
+
+The `Type` column contains the transaction type.
+```{r transaction.type}
+txn$Type <- as.factor(txn$Type)
+levels(txn$Type)
+```
+
+Transactions of type `Payment/Deposit` move cash into and out of the account.
+They do not affect the the shares, so remove them.
+```{r remove.payment.deposit}
+txn <- txn[txn$Type != "Payment/Deposit",]
+```
+
+### Security
+
+The `Security.Payee` column contains the name of the security or payee.
+This column now only contains security names since I previously removed the `Payment/Deposit` transactions so it duplicates the `Security` column.
+The `Security` column contains the security name.
+```{r security}
+txn$Security <- as.factor(txn$Security)
+securities <- levels(txn$Security)
+securities
+```
+
+### Price
+
+The `Description` column describes the transaction, e.g. `5,747.296 shares @ 10.17`.
+Quicken computes the price from the number of shares and the transaction amount, excluding other transaction costs such as commissions.
+Assante reports prices to 4 significant digits but the last 2 appear to always be 0, so round off to 2 significant digits.
+Extract the share price and store it in a new column named `Price`.
+```{r price}
+txn$Description <- gsub(",", "", txn$Description)
+txn$Price <- round(as.numeric(sub("^.* shares @ ","",txn$Description)), digits = 2)
+```
+
+### Shares and Share.Balance
+
+The `Shares` column contains the number of shares added to the holding for a security.
+It is positive for `Buy` transactions and negative for `Sell` transactions.
+The `Share.Balance` column contains the cummulative number of shares held for a security.
+Quicken exports these values using a numeric format that uses a comma to separate thousands.
+Remove the comma and convert these columns to numeric values.
+`Shares` is exported with full accuracy but `Share.Balance` is sometimes rounded off to 2 significant digits.
+For greater accuracy in reporting, use the value `Share.Balance.After` which is calculated below as the cummulative sum of `Shares`.
+```{r shares}
+txn$Shares <- as.numeric(gsub(",", "", txn$Shares))
+txn$Share.Balance <- as.numeric(gsub(",", "", txn$Share.Balance))
+```
+
+### Amount
+
+The `Amount` column contains the dollar amount by which the cash balance of the account changes in the transaction.
+```{r amount}
+txn$Amount <- as.numeric(gsub(",", "", txn$Amount))
+```
+
+Quicken reports `Amount` as 0 for dividend reinvestments because no cash enter or leaves the account.
+The transaction costs for dividend reinvestments are 0.
+Calculate the transaction amount for dividend reinvestments from the number of shares and the share price.
+This quantity is reported in cents so round it off to 2 significant digits.
+$$
+Amount_{\mathrm{div}} = -Shares*Price
+$$
+```{r reinvest.dividend.amount}
+div <- txn$Type == "Reinvest Dividend"
+txn[div, "Amount"] <- -round(txn[div,"Shares"]*txn[div,"Price"], digits = 2)
+```
+
+### Txn.Costs
+
+The transaction amount includes transaction costs such as commissions.
+The transaction amount is positive for sales and negative for purchases.
+Transaction costs are always non-negative and are reported to the nearest cent.
+The transaction amount, number of shares added, share price, and transaction costs are related as follows:
+$$
+Amount + Shares * Price + Txn.Costs = 0
+$$
+Use this equation to calculate the transaction costs from the other quantities:
+$$
+Txn.Costs = -(Amount+Shares*Price)
+$$
+```{r txn.costs}
+
+txn$Txn.Costs <- -round(txn$Amount + txn$Shares * txn$Price, digits = 2)
+
+```
+A transaction cost less than one dollar is rounding error.
+Eliminate those. 
+
+```{r}
+txn$Txn.Costs <- ifelse(txn$Txn.Costs < 1, 0, txn$Txn.Costs)
+```
+
+
+The calculations of share balance, cost basis, etc. require that the transactions are sorted chronologically by date.
+There may be many transactions on any given date.
+It is therefore useful to assign a unique identifier to each transaction.
+Sequence number is a suitable identifier for each transaction.
+```{r seq}
+txn$Seq <- 1:(dim(txn)[1])
+```
+
+Retain only the columns needed for the subsequent calculations.
+```{r retain.needed.column}
+txn <- txn[, c("Seq","Date", "Year", "Estate", "Type", "Security", "Price", "Shares", "Share.Balance", "Amount","Txn.Costs")]
+knitr::kable(txn[1:6,], caption = "Sample of prepared transaction data", row.names = FALSE)
+```
+
+## Calculation of Cost Basis and Capital Gain
+
+### Security Balances
+
+At any given point in the transaction history, each security held in the account has a balance consisting of
+the number of shares held and the cost basis in dollars of these shares.
+The number of shares is always non-negative.
+The cost basis is always non-negative.
+Initially, both of these numbers are 0.
+As transactions are made, the balance changes.
+When the number of shares held is positive we can compute the average price paid for the shares.
+For documentation purposes, we can also keep track of the date, sequence number, and type of the last transaction applied to the balance.
+
+```{r balance.init}
+balance <- data.frame(
+  Security = securities, 
+  Seq = 0, 
+  Date = as.Date("1970-01-01"), 
+  Type = "Buy", 
+  Share.Balance = 0, 
+  Cost.Basis = 0, 
+  Avg.Price = 0, 
+  row.names = "Security", 
+  stringsAsFactors = FALSE)
+knitr::kable(balance, caption = "Initial security balances")
+```
+
+### Processing the Transactions
+
+Process each row of the transaction table in chronological order as follows.
+Extend the transactions table with the following columns:
+
+* security balances immediately before the transaction is made
+    * Share.Balance.Before
+    * Cost.Basis.Before
+    * Avg.Price.Before = Cost.Basis.Before / Share.Balance.Before
+* for purchases
+    * Cost.of.Shares.Purchased = Shares \* Price = -(Amount + Txn.Costs)
+* for sales
+    * Cost.of.Shares.Sold = -Shares \* Avg.Price.Before
+    * Proceeds.from.Shares.Sold = -Shares \* Price = Amount + Txn.Costs
+    * Capital.Gain = Proceeds.from.Shares.Sold - Cost.of.Shares.Sold - Txn.Costs = Amount - Cost.of.Shares.Sold
+* security balances immediately after the transaction is made
+    * Share.Balance.After = Share.Balance.Before + Shares
+    * Cost.Basis.After
+        * for sales: Cost.Basis.Before - Cost.of.Shares.Sold
+        * for purchases: Cost.Basis.Before + Cost.of.Shares.Purchased + Txn.Costs
+    * Avg.Price.After = Cost.Basis.After / Share.Balance.After
+
+#### Purchases
+
+A purchase must increase the number of shares.
+$$
+Shares > 0
+$$
+A purchase must decrease the cash balance of the account.
+$$
+Amount < 0
+$$
+
+#### Sales
+
+A sale must decrease the number of shares.
+$$
+Shares < 0
+$$
+The account must have enough shares to cover the sale.
+$$
+Share.Balance.After \geq 0
+$$
+
+##### Theorem
+
+A sale that leaves a positive share balance does not change the average share price.
+
+##### Proof
+
+$$
+\begin{aligned}
+Avg.Price.After  &= \frac{Cost.Basis.After}{Share.Balance.After} \\
+        &\\
+        &= \frac{Cost.Basis.Before + Shares * Avg.Price.Before}{Share.Balance.Before + Shares} \\
+        &\\
+        &= \frac{Share.Balance.Before * Avg.Price.Before + Shares * Avg.Price.Before}{Share.Balance.Before + Share} \\
+        &\\
+        &= Avg.Price.Before
+\end{aligned}
+$$
+
+###### QED
+
+```{r process.txn}
+
+txn$Share.Balance.Before <- txn$Cost.Basis.Before <- txn$Avg.Price.Before <- 0
+txn$Cost.of.Shares.Purchased <- txn$Cost.of.Shares.Sold <- txn$Proceeds.from.Shares.Sold <- txn$Capital.Gain <- 0
+txn$Share.Balance.After <- txn$Cost.Basis.After <- txn$Avg.Price.After <- 0
+
+assertTrue <- function(condition, message, object) {
+  if (!condition) {
+    print(paste("Error:", message))
+    print(object)
+  }
+}
+
+for (i in 1:dim(txn)[1]) {
+
+  s <- as.character(txn[i, "Security"])
+
+  # copy the "before" security balances into the transaction
+  
+  txn[i, "Share.Balance.Before"] <- balance[s, "Share.Balance"]
+  txn[i, "Cost.Basis.Before"] <- balance[s, "Cost.Basis"]
+  txn[i, "Avg.Price.Before"] <- balance[s, "Avg.Price"]
+  
+  # apply the transaction
+  txn[i, "Share.Balance.After"] <- txn[i, "Share.Balance.Before"] + txn[i, "Shares"]
+  
+  type <- as.character(txn[i, "Type"])
+  if (type == "Sell") {
+    
+    assertTrue(txn[i, "Shares"] < 0, "a sell sale descrease the number of shares", txn[i,])
+    assertTrue(txn[i, "Share.Balance.After"] >= 0, "the account must have enough shares to cover the sale", txn[i,])
+
+    txn[i, "Proceeds.from.Shares.Sold"] <- round(txn[i, "Amount"] + txn[i, "Txn.Costs"], 2)
+    txn[i, "Cost.of.Shares.Sold"] <- round(-txn[i, "Shares"] * txn[i, "Avg.Price.Before"], 2)
+    txn[i, "Capital.Gain"] <- round(txn[i, "Proceeds.from.Shares.Sold"] - txn[i, "Cost.of.Shares.Sold"] - txn[i, "Txn.Costs"], 2)
+    txn[i, "Cost.Basis.After"] <- round(txn[i, "Cost.Basis.Before"] - txn[i, "Cost.of.Shares.Sold"], 2)
+
+  } else {
+
+    # Purchase
+    
+    assertTrue(txn[i, "Shares"] > 0, "a purchase must increase the number of shares", txn[i,])
+    assertTrue(txn[i, "Amount"] < 0, "a purchase must descrease the cash balance of the account", txn[i,])
+
+    txn[i, "Cost.of.Shares.Purchased"] <- -round(txn[i, "Amount"] + txn[i, "Txn.Costs"], 2)
+    txn[i, "Cost.Basis.After"] <- round(txn[i, "Cost.Basis.Before"] + txn[i, "Cost.of.Shares.Purchased"] + txn[i, "Txn.Costs"], 2)
+  }
+  
+  txn[i, "Avg.Price.After"] <- ifelse(txn[i, "Share.Balance.After"] > 0, round(txn[i, "Cost.Basis.After"] / txn[i, "Share.Balance.After"], digits = 4), 0)
+  
+  # update the security balance
+  balance[s, "Seq"] <- txn[i, "Seq"]
+  balance[s, "Date"] <- txn[i, "Date"]
+  balance[s, "Type"] <- type
+  balance[s, "Share.Balance"] <- txn[i, "Share.Balance.After"]
+  balance[s, "Cost.Basis"] <- txn[i, "Cost.Basis.After"]
+  balance[s, "Avg.Price"] <- txn[i, "Avg.Price.After"]
+}
+
+knitr::kable(balance, caption = "Updated account balances")
+```
+
+
+
+The market value of a security resulting from the transaction is the share balance times the share price.
+Store the market value in a new column named `Market.Value`.
+```{r market.value}
+txn$Market.Value <- round(txn$Share.Balance.After * txn$Price, 2)
+```
+
+```{r calculated.cost.basis}
+knitr::kable(txn[1:6,], caption = "Sample of calculated cost basis, etc.", row.names = FALSE)
+```
+
+## Calculate the Unrealized Capital Gain at the Date of Death
+
+Find the most recent transaction for each security up to the date of death since that will contain the final cost basis for the security.
+```{r final.cost.basis}
+max.Seq <- rep_len(0, length(securities))
+for (i in 1:length(securities)) {
+  max.Seq[i] <- max(txn[txn$Security == securities[i] & txn$Date <= date.of.death, "Seq"])
+}
+final.txn <- txn[max.Seq, c("Security", "Share.Balance", "Cost.Basis.After")]
+final.txn <- final.txn[final.txn$Share.Balance > 0,]
+knitr::kable(final.txn, caption = "Final Transactions", row.names = FALSE)
+```
+
+The share prices on the date of death are as follows:
+```{r final.share.price}
+final.share.price <- read.csv("2016-07-25-share-price.csv", colClasses = "character")
+final.share.price$Price <- as.numeric(final.share.price$Price)
+knitr::kable(final.share.price, row.names = FALSE, caption = "Share price on 2016-07-25")
+```
+
+Merge the final price into the final transaction table and compute the market value and capital gain.
+```{r merge.price}
+final.txn$Price <- 0
+for (s in final.share.price$Security) {
+  final.txn[final.txn$Security == s, "Price"] <- final.share.price[final.share.price$Security == s, "Price"]
+}
+final.txn$Market.Value <- round(final.txn$Share.Balance * final.txn$Price, 2)
+final.txn$Capital.Gain <- round(final.txn$Market.Value - final.txn$Cost.Basis.After, 2)
+knitr::kable(final.txn, caption = "Final Transactions", row.names = FALSE)
+```
+
+Summarize the capital gain.
+```{r summarize.captial.gain}
+summary.final.txn <- data.frame(
+  Cost.Basis.After = sum(final.txn$Cost.Basis.After), 
+  Market.Value = sum(final.txn$Market.Value),
+  Capital.Gain = sum(final.txn$Capital.Gain))
+knitr::kable(summary.final.txn, caption = "Summary of capital gain")
+```
+
+
+```{r write.csv}
+final.file <- paste0(txn.table.file,"-final.csv")
+write.csv(final.txn, file = final.file, row.names = FALSE)
+
+output.file <- paste0(txn.table.file,"-out.csv")
+write.csv(txn, file = output.file, row.names = FALSE)
+```
+
+## Appendix
+
+This appendix lists the raw data.
+
+### Share Prices
+
+### Transactions
+
+```{r txn}
+knitr::kable(txn[1:10,])
+```
