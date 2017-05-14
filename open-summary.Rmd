@@ -17,7 +17,7 @@ date.of.death <- as.Date("2016-07-25")
 
 This document summarizes the transactions in Jane Does's FinanceCorp Open account `123456789XY`
 for use in filing her 2016 personal income tax return.
-Bella died on ``r date.of.death``.
+Jane died on ``r date.of.death``.
 I need to compute the unrealized capital gain (or loss) on the investments in this account because that amount is taxable.
 I also need to compute the realized capital gain on all redemptions, the amount of dividends received, and the amount paid in management fees
 as of the date of death.
@@ -25,14 +25,14 @@ as of the date of death.
 ## Data Preparation
 
 ```{r file.names}
-txn.export.filename <- "2017-04-18-assante-transactions-export-bella-open.csv"
-txn.table.file <- "2017-04-18-assante-transactions-table-bella-open"
+txn.export.filename <- "2017-04-18-financecorp-transactions-export-jane-open.csv"
+txn.table.file <- "2017-04-18-financecorp-transactions-table-jane-open"
 txn.table.filename <- paste0(txn.table.file,".csv")
 ```
 To prepare the data for this analysis, I did the following:
 
 1. in Quicken
-    1. enter transaction data from Bella's Assante statements
+    1. enter transaction data from Jane's Assante statements
     2. view the transactions sorted by date
     3. export the transactions as CSV to ``r txn.export.filename``
 2. in Excel
